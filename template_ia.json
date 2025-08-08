@@ -1,0 +1,407 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "A sample template",
+  "Parameters": {
+    "Environment": {
+      "Type": "String",
+      "Default": "dev",
+      "AllowedValues": [
+        "dev",
+        "staging",
+        "prod"
+      ]
+    },
+    "AWSNovaLiteModel": {
+      "Type": "String",
+      "Default": "amazon.nova-lite-v1:0",
+      "Description": "Model Nova Lite to use for the agent"
+    },
+    "AWSTitanTextEmbeddingModelArn": {
+      "Type": "String",
+      "Default": "arn:aws:bedrock:us-east-2::foundation-model/amazon.titan-embed-text-v2:0",
+      "Description": "Embedding model to use for the agent"
+    }
+  },
+  "Conditions": {
+    "IsProd": {
+      "Fn::Equals": [
+        {
+          "Ref": "Environment"
+        },
+        "prod"
+      ]
+    }
+  },
+  "Resources": {
+    "AgentRole": {
+      "Type": "AWS::IAM::Role",
+      "Metadata": {
+        "Purpose": "Rol IAM para acceso a bases de conocimiento"
+      },
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "bedrock.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "KnowledgeBaseAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "bedrock:Retrieve",
+                    "bedrock:RetrieveAndGenerate"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "aoss:APIAccessAll"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "OpenSearchCollection",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:ListBucket"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "BucketDataDevOpsS3",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::Sub": "${BucketDataDevOpsS3.Arn}/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "NovaLiteParameter": {
+      "Type": "AWS::SSM::Parameter",
+      "Metadata": {
+        "Purpose": "Parámetro que almacena el modelo Nova Lite"
+      },
+      "Properties": {
+        "Name": "/agents/models/aws-nova-lite",
+        "Type": "String",
+        "Value": {
+          "Ref": "AWSNovaLiteModel"
+        },
+        "Description": "Model to use for the agent"
+      }
+    },
+    "BasicGuardrail": {
+      "Type": "AWS::Bedrock::Guardrail",
+      "Metadata": {
+        "Purpose": "Filtro de contenido para el agente"
+      },
+      "Properties": {
+        "Name": "BasicContentFilter",
+        "BlockedInputMessaging": "Lo siento, no puedo procesar ese tipo de contenido. Por favor, reformula tu pregunta de manera apropiada.",
+        "BlockedOutputsMessaging": "No puedo generar ese tipo de respuesta. Por favor, intenta con otra consulta.",
+        "ContentPolicyConfig": {
+          "FiltersConfig": [
+            {
+              "Type": "HATE",
+              "InputStrength": "HIGH",
+              "OutputStrength": "HIGH"
+            },
+            {
+              "Type": "VIOLENCE",
+              "InputStrength": "MEDIUM",
+              "OutputStrength": "MEDIUM"
+            }
+          ]
+        },
+        "SensitiveInformationPolicyConfig": {
+          "PiiEntitiesConfig": [
+            {
+              "Type": "EMAIL",
+              "Action": "BLOCK"
+            }
+          ]
+        }
+      }
+    },
+    "OpenSearchEncryptionPolicy": {
+      "Type": "AWS::OpenSearchServerless::SecurityPolicy",
+      "Properties": {
+        "Name": "encryption-policy-devops",
+        "Type": "encryption",
+        "Policy": "{\"Rules\":[{\"ResourceType\":\"collection\",\"Resource\":[\"collection/knowledge-collection-devops\"]}],\"AWSOwnedKey\":true}"
+      }
+    },
+    "OpenSearchNetworkPolicy": {
+      "Type": "AWS::OpenSearchServerless::SecurityPolicy",
+      "Properties": {
+        "Name": "network-policy-devops",
+        "Type": "network",
+        "Policy": "[{\"Rules\":[{\"ResourceType\":\"collection\",\"Resource\":[\"collection/knowledge-collection-devops\"]}],\"AllowFromPublic\":true}]"
+      }
+    },
+    "OpenSearchCollection": {
+      "Type": "AWS::OpenSearchServerless::Collection",
+      "DependsOn": [
+        "OpenSearchEncryptionPolicy",
+        "OpenSearchNetworkPolicy"
+      ],
+      "Properties": {
+        "Name": "knowledge-collection-devops",
+        "Type": "VECTORSEARCH"
+      }
+    },
+    "OpenSearchAccessPolicy": {
+      "Type": "AWS::OpenSearchServerless::AccessPolicy",
+      "DependsOn": "KnowledgeBaseDevOps",
+      "Properties": {
+        "Name": "bedrock-access-policy",
+        "Type": "data",
+        "Policy": {
+          "Fn::Sub": [
+            "[{\"Rules\":[{\"Resource\":[\"index/knowledge-collection-devops/*\"],\"Permission\":[\"aoss:ReadDocument\",\"aoss:WriteDocument\"],\"ResourceType\":\"index\"}],\"Principal\":[\"arn:aws:iam::${AWS::AccountId}:role/service-role/AmazonBedrockExecutionRoleForKnowledgeBase_${KnowledgeBaseId}\"]}]",
+            {
+              "KnowledgeBaseId": {
+                "Ref": "KnowledgeBaseDevOps"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "BucketDataDevOpsS3": {
+      "Type": "AWS::S3::Bucket",
+      "Metadata": {
+        "Purpose": "Bucket para datos suplementarios de la base de conocimiento de devops"
+      },
+      "Properties": {
+        "BucketName": {
+          "Fn::Sub": "bedrock-devops-${Environment}-${AWS::AccountId}-${AWS::StackName}"
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        }
+      }
+    },
+    "KnowledgeBaseDevOps": {
+      "Type": "AWS::Bedrock::KnowledgeBase",
+      "DependsOn": [
+        "OpenSearchCollection",
+        "AgentRole",
+        "BucketDataDevOpsS3"
+      ],
+      "Properties": {
+        "Name": "KnowledgeBaseDevOps",
+        "Description": "Knowledge base for the agent DevOps",
+        "RoleArn": {
+          "Fn::GetAtt": [
+            "AgentRole",
+            "Arn"
+          ]
+        },
+        "KnowledgeBaseConfiguration": {
+          "Type": "VECTOR",
+          "VectorKnowledgeBaseConfiguration": {
+            "EmbeddingModelArn": {
+              "Ref": "AWSTitanTextEmbeddingModelArn"
+            },
+            "EmbeddingModelConfiguration": {
+              "BedrockEmbeddingModelConfiguration": {
+                "Dimensions": 1024,
+                "EmbeddingDataType": "FLOAT32"
+              }
+            },
+            "SupplementalDataStorageConfiguration": {
+              "SupplementalDataStorageLocations": [
+                {
+                  "S3Location": {
+                    "URI": {
+                      "Fn::Sub": "s3://${BucketDataDevOpsS3}"
+                    }
+                  },
+                  "SupplementalDataStorageLocationType": "S3"
+                }
+              ]
+            }
+          }
+        },
+        "StorageConfiguration": {
+          "Type": "OPENSEARCH_SERVERLESS",
+          "OpensearchServerlessConfiguration": {
+            "CollectionArn": {
+              "Fn::GetAtt": [
+                "OpenSearchCollection",
+                "Arn"
+              ]
+            },
+            "VectorIndexName": "bedrock-knowledge-base-index",
+            "FieldMapping": {
+              "VectorField": "bedrock-knowledge-base-default-vector-devops",
+              "TextField": "AMAZON_BEDROCK_TEXT_CHUNK",
+              "MetadataField": "AMAZON_BEDROCK_METADATA"
+            }
+          }
+        },
+        "Tags": {
+          "Project": "Chatbot",
+          "Environment": {
+            "Ref": "Environment"
+          },
+          "Version": "v1"
+        }
+      }
+    },
+    "AgentDevOps": {
+      "Type": "AWS::Bedrock::Agent",
+      "Metadata": {
+        "Purpose": "Agente principal con memoria y configuración de tags"
+      },
+      "Properties": {
+        "AgentName": "AgentDevOps",
+        "FoundationModel": {
+          "Ref": "NovaLiteParameter"
+        },
+        "AutoPrepare": true,
+        "Instruction": "te llamaras Antonio, eres un experto expecializado en aws, si el usuario te llega a realizar preguntas relacionadas con aws, aprovecha la base de conocimientos pra nutrirte de informacion directa de aws, siempre las respuestas debes enviarselas al usuario en español, y los ejemplos de codigo envalos en formato markdown",
+        "Description": "Agent for developer",
+        "MemoryConfiguration": {
+          "EnabledMemoryTypes": [
+            "SESSION_SUMMARY"
+          ],
+          "StorageDays": 30
+        },
+        "KnowledgeBases": [
+          {
+            "Description": "Knowledge base for the agent DevOps",
+            "KnowledgeBaseId": {
+              "Ref": "KnowledgeBaseDevOps"
+            },
+            "KnowledgeBaseState": "ACTIVE"
+          }
+        ],
+        "AgentResourceRoleArn": {
+          "Fn::GetAtt": [
+            "AgentRole",
+            "Arn"
+          ]
+        },
+        "GuardrailConfiguration": {
+          "GuardrailIdentifier": {
+            "Ref": "BasicGuardrail"
+          },
+          "GuardrailVersion": {
+            "Fn::If": [
+              "IsProd",
+              "1",
+              "DRAFT"
+            ]
+          }
+        },
+        "Tags": {
+          "Project": "Chatbot",
+          "Environment": {
+            "Ref": "Environment"
+          },
+          "Version": "v1"
+        },
+        "TestAliasTags": {
+          "Environment": {
+            "Ref": "Environment"
+          },
+          "Stage": {
+            "Fn::If": [
+              "IsProd",
+              "production",
+              "development"
+            ]
+          }
+        }
+      }
+    },
+    "AgentDevOpsErrorAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "Purpose": "Monitorea errores del agente en todos los entornos"
+      },
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AgentDevOps}-Errors-${Environment}"
+        },
+        "AlarmDescription": "Agent error rate is too high",
+        "MetricName": "InvocationClientErrors",
+        "Namespace": "AWS/Bedrock",
+        "Statistic": "Sum",
+        "Period": 300,
+        "EvaluationPeriods": 2,
+        "Threshold": 5,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "Dimensions": [
+          {
+            "Name": "AgentId",
+            "Value": {
+              "Ref": "AgentDevOps"
+            }
+          }
+        ]
+      }
+    },
+    "AgentDevOpsLatencyAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Condition": "IsProd",
+      "Metadata": {
+        "Purpose": "Monitorea latencia alta solo en producción"
+      },
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AgentDevOps}-HighLatency-${Environment}"
+        },
+        "AlarmDescription": "Agent response time is too high",
+        "MetricName": "InvocationLatency",
+        "Namespace": "AWS/Bedrock",
+        "Statistic": "Average",
+        "Period": 300,
+        "EvaluationPeriods": 3,
+        "Threshold": 10000,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "Dimensions": [
+          {
+            "Name": "AgentId",
+            "Value": {
+              "Ref": "AgentDevOps"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

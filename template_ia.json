@@ -1,7 +1,12 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
-  "Description": "A sample template",
+  "Description": "recursos para desplegar un agente bedrock con bases de conocimiento",
   "Parameters": {
+    "LambdaCodeBucket": {
+      "Type": "String",
+      "Default": "tu-bucket-de-codigo",
+      "Description": "Bucket S3 donde está el código Lambda"
+    },
     "Environment": {
       "Type": "String",
       "Default": "dev",
@@ -175,24 +180,6 @@
         "Type": "VECTORSEARCH"
       }
     },
-    "OpenSearchAccessPolicy": {
-      "Type": "AWS::OpenSearchServerless::AccessPolicy",
-      "DependsOn": "KnowledgeBaseDevOps",
-      "Properties": {
-        "Name": "bedrock-access-policy",
-        "Type": "data",
-        "Policy": {
-          "Fn::Sub": [
-            "[{\"Rules\":[{\"Resource\":[\"index/knowledge-collection-devops/*\"],\"Permission\":[\"aoss:ReadDocument\",\"aoss:WriteDocument\"],\"ResourceType\":\"index\"}],\"Principal\":[\"arn:aws:iam::${AWS::AccountId}:role/service-role/AmazonBedrockExecutionRoleForKnowledgeBase_${KnowledgeBaseId}\"]}]",
-            {
-              "KnowledgeBaseId": {
-                "Ref": "KnowledgeBaseDevOps"
-              }
-            }
-          ]
-        }
-      }
-    },
     "BucketDataDevOpsS3": {
       "Type": "AWS::S3::Bucket",
       "Metadata": {
@@ -213,12 +200,140 @@
         }
       }
     },
+    "CreateIndexLambdaRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "OpenSearchCreateIndexPolicy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "aoss:APIAccessAll"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "OpenSearchCollection",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": "arn:aws:logs:*:*:*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "LambdaDependenciesLayer": {
+      "Type": "AWS::Lambda::LayerVersion",
+      "Properties": {
+        "LayerName": "OpenSearchPyDependencies",
+        "Description": "Dependencies for OpenSearch Lambda function",
+        "Content": {
+          "S3Bucket": "layer-artifacts-lambdas",
+          "S3Key": "my_dependencies_layer.zip"
+        },
+        "CompatibleRuntimes": [
+          "python3.9"
+        ]
+      }
+    },
+    "CreateIndexLambda": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": "LambdaDependenciesLayer",
+      "Properties": {
+        "Code": {
+          "S3Bucket": "lambda-artifacts-functions",
+          "S3Key": "function.zip"
+        },
+        "Handler": "create_index_handler.lambda_handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "CreateIndexLambdaRole",
+            "Arn"
+          ]
+        },
+        "Runtime": "python3.9",
+        "Timeout": 300,
+        "MemorySize": 128,
+        "Layers": [
+          {
+            "Ref": "LambdaDependenciesLayer"
+          }
+        ]
+      }
+    },
+    "OpenSearchVectorIndex": {
+      "Type": "Custom::OpenSearchVectorIndex",
+      "DependsOn": [
+        "OpenSearchCollection",
+        "CreateIndexLambda"
+      ],
+      "Properties": {
+        "ServiceToken": {
+          "Fn::GetAtt": [
+            "CreateIndexLambda",
+            "Arn"
+          ]
+        },
+        "CollectionEndpoint": {
+          "Fn::GetAtt": [
+            "OpenSearchCollection",
+            "CollectionEndpoint"
+          ]
+        },
+        "VectorIndexName": "bedrock-knowledge-base-index"
+      }
+    },
+    "OpenSearchAccessPolicy": {
+      "Type": "AWS::OpenSearchServerless::AccessPolicy",
+      "DependsOn": "KnowledgeBaseDevOps",
+      "Properties": {
+        "Name": "bedrock-access-policy",
+        "Type": "data",
+        "Policy": {
+          "Fn::Sub": [
+            "[{\"Rules\":[{\"Resource\":[\"index/knowledge-collection-devops/*\"],\"Permission\":[\"aoss:ReadDocument\",\"aoss:WriteDocument\"],\"ResourceType\":\"index\"}],\"Principal\":[\"arn:aws:iam::${AWS::AccountId}:role/service-role/AmazonBedrockExecutionRoleForKnowledgeBase_${KnowledgeBaseId}\"]}]",
+            {
+              "KnowledgeBaseId": {
+                "Ref": "KnowledgeBaseDevOps"
+              }
+            }
+          ]
+        }
+      }
+    },
     "KnowledgeBaseDevOps": {
       "Type": "AWS::Bedrock::KnowledgeBase",
       "DependsOn": [
         "OpenSearchCollection",
         "AgentRole",
-        "BucketDataDevOpsS3"
+        "BucketDataDevOpsS3",
+        "OpenSearchVectorIndex"
       ],
       "Properties": {
         "Name": "KnowledgeBaseDevOps",

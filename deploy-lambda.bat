@@ -15,7 +15,7 @@ echo instalando cfnresponse...
 pip install cfnresponse -t python/
 echo cfnresponse instalado...
 echo Esperando unos segundos porfavor...
-timeout /t 20
+timeout /t 5
 
 echo Empaquetando layers...
 powershell  Compress-Archive -Path ".\python" -DestinationPath ".\my_dependencies_layer.zip"
@@ -59,3 +59,4 @@ aws cloudformation package --template-file template_ia.json --s3-bucket template
 echo artefacto creado..
 echo desplegando a cloudformation
 aws cloudformation deploy --template-file packaged-template_ia.json --stack-name bedrock-devops-stack --capabilities CAPABILITY_NAMED_IAM
+del packaged-template_ia.json

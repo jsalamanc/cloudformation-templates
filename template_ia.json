@@ -224,14 +224,9 @@
                 {
                   "Effect": "Allow",
                   "Action": [
-                    "aoss:APIAccessAll"
+                    "aoss:*"
                   ],
-                  "Resource": {
-                    "Fn::GetAtt": [
-                      "OpenSearchCollection",
-                      "Arn"
-                    ]
-                  }
+                  "Resource": "*"
                 },
                 {
                   "Effect": "Allow",
@@ -287,11 +282,33 @@
         ]
       }
     },
+    "LambdaOpenSearchAccessPolicy": {
+      "Type": "AWS::OpenSearchServerless::AccessPolicy",
+      "DependsOn": "CreateIndexLambda",
+      "Properties": {
+        "Name": "lambda-access-policy",
+        "Type": "data",
+        "Policy": {
+          "Fn::Sub": [
+            "[{\"Rules\":[{\"Resource\":[\"collection/knowledge-collection-devops\"],\"Permission\":[\"aoss:*\"],\"ResourceType\":\"collection\"},{\"Resource\":[\"index/knowledge-collection-devops/*\"],\"Permission\":[\"aoss:*\"],\"ResourceType\":\"index\"}],\"Principal\":[\"${LambdaRoleArn}\"]}]",
+            {
+              "LambdaRoleArn": {
+                "Fn::GetAtt": [
+                  "CreateIndexLambdaRole",
+                  "Arn"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
     "OpenSearchVectorIndex": {
       "Type": "Custom::OpenSearchVectorIndex",
       "DependsOn": [
         "OpenSearchCollection",
-        "CreateIndexLambda"
+        "CreateIndexLambda",
+        "LambdaOpenSearchAccessPolicy"
       ],
       "Properties": {
         "ServiceToken": {
@@ -317,7 +334,7 @@
         "Type": "data",
         "Policy": {
           "Fn::Sub": [
-            "[{\"Rules\":[{\"Resource\":[\"index/knowledge-collection-devops/*\"],\"Permission\":[\"aoss:ReadDocument\",\"aoss:WriteDocument\"],\"ResourceType\":\"index\"}],\"Principal\":[\"arn:aws:iam::${AWS::AccountId}:role/service-role/AmazonBedrockExecutionRoleForKnowledgeBase_${KnowledgeBaseId}\"]}]",
+            "[{\"Rules\":[{\"Resource\":[\"index/knowledge-collection-devops/*\"],\"Permission\":[\"aoss:ReadDocument\",\"aoss:WriteDocument\"],\"ResourceType\":\"index\"}],\"Principal\":[\"arn:aws:iam::${AWS::AccountId}:role/service-role/AmazonBedrockExecutionRoleForKnowledgeBase_${KnowledgeBaseId}\"]},{\"Rules\":[{\"Resource\":[\"collection/knowledge-collection-devops\"],\"Permission\":[\"aoss:CreateIndex\",\"aoss:DeleteIndex\",\"aoss:UpdateIndex\",\"aoss:DescribeIndex\",\"aoss:ReadDocument\",\"aoss:WriteDocument\",\"aoss:CreateCollectionItems\",\"aoss:DeleteCollectionItems\",\"aoss:UpdateCollectionItems\",\"aoss:DescribeCollectionItems\"],\"ResourceType\":\"collection\"}],\"Principal\":[\"arn:aws:iam::${AWS::AccountId}:user/${AWS::StackName}-dashboard-user\",\"arn:aws:iam::${AWS::AccountId}:root\"]}]",
             {
               "KnowledgeBaseId": {
                 "Ref": "KnowledgeBaseDevOps"

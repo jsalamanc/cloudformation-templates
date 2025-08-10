@@ -1,0 +1,346 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Infraestructura para agente DevOps - Bucket S3, OpenSearch y Bedrock'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: devops-agent
+    Description: Nombre del proyecto para nombrar recursos
+  
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Ambiente de despliegue
+
+  EmbeddingModel:
+    Type: String
+    Default: amazon.titan-embed-text-v1
+    AllowedValues: 
+      - amazon.titan-embed-text-v1
+      - amazon.titan-embed-text-v2:0
+      - cohere.embed-english-v3
+      - cohere.embed-multilingual-v3
+    Description: Modelo de embeddings para la base de conocimiento
+
+Resources:
+  # Bucket S3 para archivos del agente DevOps
+  DevOpsAgentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-files-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # Política de encriptación para OpenSearch Serverless
+  EncryptionPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    DependsOn: DevOpsAgentBucket
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-encryption'
+      Type: encryption
+      Policy: !Sub |
+        {
+          "Rules": [
+            {
+              "ResourceType": "collection",
+              "Resource": ["collection/${ProjectName}-${Environment}-vectors"]
+            }
+          ],
+          "AWSOwnedKey": true
+        }
+
+  # Política de red para OpenSearch Serverless
+  NetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    DependsOn: EncryptionPolicy
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-network-policy'
+      Type: network
+      Policy: !Sub |
+        [
+          {
+            "Rules": [
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/${ProjectName}-${Environment}-vectors"]
+              },
+              {
+                "ResourceType": "dashboard",
+                "Resource": ["collection/${ProjectName}-${Environment}-vectors"]
+              }
+            ],
+            "AllowFromPublic": true
+          }
+        ]
+
+  # Política de acceso para OpenSearch Serverless
+  AccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    DependsOn: NetworkPolicy
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-access-policy'
+      Type: data
+      Policy: !Sub |
+        [
+          {
+            "Rules": [
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/${ProjectName}-${Environment}-vectors"],
+                "Permission": [
+                  "aoss:CreateCollectionItems",
+                  "aoss:DeleteCollectionItems",
+                  "aoss:UpdateCollectionItems",
+                  "aoss:DescribeCollectionItems"
+                ]
+              },
+              {
+                "ResourceType": "index",
+                "Resource": ["index/${ProjectName}-${Environment}-vectors/*"],
+                "Permission": [
+                  "aoss:CreateIndex",
+                  "aoss:DeleteIndex",
+                  "aoss:UpdateIndex",
+                  "aoss:DescribeIndex",
+                  "aoss:ReadDocument",
+                  "aoss:WriteDocument"
+                ]
+              }
+            ],
+            "Principal": [
+              "arn:aws:iam::${AWS::AccountId}:root",
+              "arn:aws:iam::${AWS::AccountId}:user/admin"
+            ]
+          }
+        ]
+
+  # Colección vectorial OpenSearch Serverless
+  VectorCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    DependsOn:
+      - EncryptionPolicy
+      - NetworkPolicy
+      - AccessPolicy
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-vectors'
+      Description: 'Colección vectorial para agente DevOps'
+      Type: VECTORSEARCH
+      StandbyReplicas: 'DISABLED'
+
+  # Índice vectorial OpenSearch Serverless
+  VectorIndex:
+    Type: AWS::OpenSearchServerless::Index
+    DependsOn: VectorCollection
+    Properties:
+      CollectionEndpoint: !GetAtt VectorCollection.CollectionEndpoint
+      IndexName: devops-vectors
+      Mappings:
+        Properties:
+          Dimension: 1024
+          Type: knn_vector
+          Method:
+            Name: hnsw
+            spaceType: l2
+            Engine: faiss
+      Settings:
+        Index:
+          Knn: true
+
+  # Rol de servicio para Bedrock Knowledge Base
+  BedrockKnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-bedrock-kb-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3DataSourceAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DevOpsAgentBucket.Arn
+                  - !Sub '${DevOpsAgentBucket.Arn}/*'
+        - PolicyName: OpenSearchServerlessAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: !GetAtt VectorCollection.Arn
+        - PolicyName: BedrockModelAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${EmbeddingModel}'
+
+  # Base de conocimiento de Bedrock
+  BedrockKnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    DependsOn: VectorIndex
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-knowledge-base'
+      Description: 'Base de conocimiento DevOps con sincronización S3-OpenSearch'
+      RoleArn: !GetAtt BedrockKnowledgeBaseRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${EmbeddingModel}'
+      StorageConfiguration:
+        Type: OPENSEARCH_SERVERLESS
+        OpensearchServerlessConfiguration:
+          CollectionArn: !GetAtt VectorCollection.Arn
+          VectorIndexName: 'devops-vectors'
+          FieldMapping:
+            VectorField: 'vector_embedding'
+            TextField: 'content'
+            MetadataField: 'metadata'
+
+  # Fuente de datos S3 para la base de conocimiento
+  BedrockDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-s3-datasource'
+      Description: 'Fuente de datos S3 para documentos DevOps'
+      KnowledgeBaseId: !Ref BedrockKnowledgeBase
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: !GetAtt DevOpsAgentBucket.Arn
+          InclusionPrefixes:
+            - 'documents/'
+            - 'configs/'
+            - 'scripts/'
+      VectorIngestionConfiguration:
+        ChunkingConfiguration:
+          ChunkingStrategy: FIXED_SIZE
+          FixedSizeChunkingConfiguration:
+            MaxTokens: 512
+            OverlapPercentage: 20
+
+  # Rol IAM para el agente DevOps
+  DevOpsAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-agent-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - ec2.amazonaws.com
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DevOpsAgentBucket.Arn
+                  - !Sub '${DevOpsAgentBucket.Arn}/*'
+        - PolicyName: OpenSearchServerlessAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: !GetAtt VectorCollection.Arn
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:Retrieve
+                  - bedrock:RetrieveAndGenerate
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${BedrockKnowledgeBase}'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/*'
+
+Outputs:
+  S3BucketName:
+    Description: 'Nombre del bucket S3 para archivos'
+    Value: !Ref DevOpsAgentBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-bucket-name'
+
+  S3BucketArn:
+    Description: 'ARN del bucket S3'
+    Value: !GetAtt DevOpsAgentBucket.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-bucket-arn'
+
+  VectorCollectionEndpoint:
+    Description: 'Endpoint de la colección vectorial OpenSearch Serverless'
+    Value: !GetAtt VectorCollection.CollectionEndpoint
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-collection-endpoint'
+
+  VectorCollectionArn:
+    Description: 'ARN de la colección vectorial'
+    Value: !GetAtt VectorCollection.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-collection-arn'
+
+  VectorCollectionName:
+    Description: 'Nombre de la colección vectorial'
+    Value: !Ref VectorCollection
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-collection-name'
+
+  BedrockKnowledgeBaseId:
+    Description: 'ID de la base de conocimiento de Bedrock'
+    Value: !Ref BedrockKnowledgeBase
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-kb-id'
+
+  BedrockKnowledgeBaseArn:
+    Description: 'ARN de la base de conocimiento de Bedrock'
+    Value: !GetAtt BedrockKnowledgeBase.KnowledgeBaseArn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-kb-arn'
+
+  BedrockDataSourceId:
+    Description: 'ID de la fuente de datos S3'
+    Value: !Ref BedrockDataSource
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-datasource-id'
+
+  DevOpsAgentRoleArn:
+    Description: 'ARN del rol IAM para el agente DevOps'
+    Value: !GetAtt DevOpsAgentRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-agent-role-arn'

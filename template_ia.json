@@ -58,7 +58,7 @@
         },
         "Policies": [
           {
-            "PolicyName": "KnowledgeBaseAccess",
+            "PolicyName": "BedrockKnowledgeBaseAccess",
             "PolicyDocument": {
               "Version": "2012-10-17",
               "Statement": [
@@ -66,21 +66,24 @@
                   "Effect": "Allow",
                   "Action": [
                     "bedrock:Retrieve",
-                    "bedrock:RetrieveAndGenerate"
+                    "bedrock:RetrieveAndGenerate",
+                    "bedrock:InvokeModel",
+                    "bedrock:CreateKnowledgeBase",
+                    "bedrock:GetFoundationModel",
+                    "bedrock:ListFoundationModels"
                   ],
                   "Resource": "*"
                 },
                 {
                   "Effect": "Allow",
                   "Action": [
-                    "aoss:APIAccessAll"
+                    "aoss:APIAccessAll",
+                    "aoss:CreateIndex",
+                    "aoss:DescribeIndex",
+                    "aoss:ReadDocument",
+                    "aoss:WriteDocument"
                   ],
-                  "Resource": {
-                    "Fn::GetAtt": [
-                      "OpenSearchCollection",
-                      "Arn"
-                    ]
-                  }
+                  "Resource": "*"
                 },
                 {
                   "Effect": "Allow",
@@ -303,12 +306,37 @@
         }
       }
     },
+    "AgentOpenSearchAccessPolicy": {
+      "Type": "AWS::OpenSearchServerless::AccessPolicy",
+      "DependsOn": [
+        "AgentRole",
+        "OpenSearchCollection"
+      ],
+      "Properties": {
+        "Name": "agent-access-policy",
+        "Type": "data",
+        "Policy": {
+          "Fn::Sub": [
+            "[{\"Rules\":[{\"Resource\":[\"collection/knowledge-collection-devops\"],\"Permission\":[\"aoss:*\"],\"ResourceType\":\"collection\"},{\"Resource\":[\"index/knowledge-collection-devops/*\"],\"Permission\":[\"aoss:*\"],\"ResourceType\":\"index\"}],\"Principal\":[\"${AgentRoleArn}\"]}]",
+            {
+              "AgentRoleArn": {
+                "Fn::GetAtt": [
+                  "AgentRole",
+                  "Arn"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
     "OpenSearchVectorIndex": {
       "Type": "Custom::OpenSearchVectorIndex",
       "DependsOn": [
         "OpenSearchCollection",
         "CreateIndexLambda",
-        "LambdaOpenSearchAccessPolicy"
+        "LambdaOpenSearchAccessPolicy",
+        "AgentOpenSearchAccessPolicy"
       ],
       "Properties": {
         "ServiceToken": {
@@ -326,31 +354,14 @@
         "VectorIndexName": "bedrock-knowledge-base-index"
       }
     },
-    "OpenSearchAccessPolicy": {
-      "Type": "AWS::OpenSearchServerless::AccessPolicy",
-      "DependsOn": "KnowledgeBaseDevOps",
-      "Properties": {
-        "Name": "bedrock-access-policy",
-        "Type": "data",
-        "Policy": {
-          "Fn::Sub": [
-            "[{\"Rules\":[{\"Resource\":[\"index/knowledge-collection-devops/*\"],\"Permission\":[\"aoss:ReadDocument\",\"aoss:WriteDocument\"],\"ResourceType\":\"index\"}],\"Principal\":[\"arn:aws:iam::${AWS::AccountId}:role/service-role/AmazonBedrockExecutionRoleForKnowledgeBase_${KnowledgeBaseId}\"]},{\"Rules\":[{\"Resource\":[\"collection/knowledge-collection-devops\"],\"Permission\":[\"aoss:CreateIndex\",\"aoss:DeleteIndex\",\"aoss:UpdateIndex\",\"aoss:DescribeIndex\",\"aoss:ReadDocument\",\"aoss:WriteDocument\",\"aoss:CreateCollectionItems\",\"aoss:DeleteCollectionItems\",\"aoss:UpdateCollectionItems\",\"aoss:DescribeCollectionItems\"],\"ResourceType\":\"collection\"}],\"Principal\":[\"arn:aws:iam::${AWS::AccountId}:user/${AWS::StackName}-dashboard-user\",\"arn:aws:iam::${AWS::AccountId}:root\"]}]",
-            {
-              "KnowledgeBaseId": {
-                "Ref": "KnowledgeBaseDevOps"
-              }
-            }
-          ]
-        }
-      }
-    },
     "KnowledgeBaseDevOps": {
       "Type": "AWS::Bedrock::KnowledgeBase",
       "DependsOn": [
         "OpenSearchCollection",
         "AgentRole",
         "BucketDataDevOpsS3",
-        "OpenSearchVectorIndex"
+        "OpenSearchVectorIndex",
+        "AgentOpenSearchAccessPolicy"
       ],
       "Properties": {
         "Name": "KnowledgeBaseDevOps",
@@ -421,7 +432,7 @@
       "Properties": {
         "AgentName": "AgentDevOps",
         "FoundationModel": {
-          "Ref": "NovaLiteParameter"
+          "Ref": "AWSNovaLiteModel"
         },
         "AutoPrepare": true,
         "Instruction": "te llamaras Antonio, eres un experto expecializado en aws, si el usuario te llega a realizar preguntas relacionadas con aws, aprovecha la base de conocimientos pra nutrirte de informacion directa de aws, siempre las respuestas debes enviarselas al usuario en español, y los ejemplos de codigo envalos en formato markdown",

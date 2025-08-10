@@ -131,7 +131,7 @@ def lambda_handler(event, context):
                 print(f"Índice {index_name} creado exitosamente.")
             else:
                 print(f"El índice {index_name} ya existe. No se tomaron medidas.")
-
+        response_data['VectorIndexName'] = index_name
     except Exception as e:
         print(f"Error durante el procesamiento: {str(e)}")
         response_data['Message'] = str(e)

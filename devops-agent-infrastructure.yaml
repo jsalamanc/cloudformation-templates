@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Infraestructura para agente DevOps - Bucket S3, OpenSearch y Bedrock'
+Description: 'Infraestructura para agente DevOps espelializado en AWS - Bucket S3, OpenSearch y Bedrock'
 
 Parameters:
   ProjectName:
@@ -15,7 +15,7 @@ Parameters:
 
   EmbeddingModel:
     Type: String
-    Default: amazon.titan-embed-text-v1
+    Default: amazon.titan-embed-text-v2:0
     AllowedValues: 
       - amazon.titan-embed-text-v1
       - amazon.titan-embed-text-v2:0
@@ -24,7 +24,7 @@ Parameters:
     Description: Modelo de embeddings para la base de conocimiento
 
 Resources:
-  # Bucket S3 para archivos del agente DevOps
+  # 1. Bucket S3 para archivos del agente DevOps
   DevOpsAgentBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -41,7 +41,7 @@ Resources:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
 
-  # Política de encriptación para OpenSearch Serverless
+  # 2. Política de encriptación para OpenSearch Serverless
   EncryptionPolicy:
     Type: AWS::OpenSearchServerless::SecurityPolicy
     DependsOn: DevOpsAgentBucket
@@ -59,7 +59,7 @@ Resources:
           "AWSOwnedKey": true
         }
 
-  # Política de red para OpenSearch Serverless
+  # 3. Política de red para OpenSearch Serverless
   NetworkPolicy:
     Type: AWS::OpenSearchServerless::SecurityPolicy
     DependsOn: EncryptionPolicy
@@ -83,10 +83,12 @@ Resources:
           }
         ]
 
-  # Política de acceso para OpenSearch Serverless
+  # 4. Política de acceso para OpenSearch Serverless
   AccessPolicy:
     Type: AWS::OpenSearchServerless::AccessPolicy
-    DependsOn: NetworkPolicy
+    DependsOn: 
+      - NetworkPolicy
+      - IndexCreatorLambdaRole
     Properties:
       Name: !Sub '${ProjectName}-${Environment}-access-policy'
       Type: data
@@ -119,12 +121,51 @@ Resources:
             ],
             "Principal": [
               "arn:aws:iam::${AWS::AccountId}:root",
-              "arn:aws:iam::${AWS::AccountId}:user/admin"
+              "arn:aws:iam::${AWS::AccountId}:user/admin",
+              "${IndexCreatorLambdaRole.Arn}"
             ]
           }
         ]
 
-  # Colección vectorial OpenSearch Serverless
+  # 5. Rol IAM para la función Lambda (definido antes para evitar referencias circulares)
+  IndexCreatorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-index-creator-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: OpenSearchServerlessAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: '*'
+
+  # 6. Lambda Layer para dependencias
+  LambdaLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub '${ProjectName}-${Environment}-dependencies'
+      Description: 'Layer con opensearch-py y cfnresponse'
+      Content:
+        S3Bucket: layer-artifacts-lambdas
+        S3Key: my_dependencies_layer.zip
+      CompatibleRuntimes:
+        - python3.9
+        - python3.10
+        - python3.11
+
+  # 7. Colección vectorial OpenSearch Serverless
   VectorCollection:
     Type: AWS::OpenSearchServerless::Collection
     DependsOn:
@@ -137,28 +178,53 @@ Resources:
       Type: VECTORSEARCH
       StandbyReplicas: 'DISABLED'
 
-  # Índice vectorial OpenSearch Serverless
-  VectorIndex:
-    Type: AWS::OpenSearchServerless::Index
-    DependsOn: VectorCollection
+  # 8. Función Lambda para crear el índice
+  IndexCreatorLambda:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - VectorCollection
+      - IndexCreatorLambdaRole
+      - LambdaLayer
     Properties:
-      CollectionEndpoint: !GetAtt VectorCollection.CollectionEndpoint
-      IndexName: devops-vectors
-      Mappings:
-        Properties:
-          Dimension: 1024
-          Type: knn_vector
-          Method:
-            Name: hnsw
-            spaceType: l2
-            Engine: faiss
-      Settings:
-        Index:
-          Knn: true
+      FunctionName: !Sub '${ProjectName}-${Environment}-index-creator'
+      Runtime: python3.11
+      Handler: create_index_handler.lambda_handler
+      Role: !GetAtt IndexCreatorLambdaRole.Arn
+      Timeout: 900
+      Code:
+        S3Bucket: lambda-artifacts-functions
+        S3Key: function.zip
+      Layers:
+        - !Ref LambdaLayer
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
 
-  # Rol de servicio para Bedrock Knowledge Base
+  # 9. Permiso para que CloudFormation invoque la función Lambda
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: IndexCreatorLambda
+    Properties:
+      FunctionName: !Ref IndexCreatorLambda
+      Action: lambda:InvokeFunction
+      Principal: cloudformation.amazonaws.com
+
+  # 10. Custom Resource para invocar y crear el índice vectorial
+  VectorIndex:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: 
+      - VectorCollection
+      - AccessPolicy
+      - LambdaInvokePermission
+    Properties:
+      ServiceToken: !GetAtt IndexCreatorLambda.Arn
+      CollectionEndpoint: !GetAtt VectorCollection.CollectionEndpoint
+      VectorIndexName: devops-vectors
+
+  # 11. Rol de servicio para Bedrock Knowledge Base
   BedrockKnowledgeBaseRole:
     Type: AWS::IAM::Role
+    DependsOn: VectorIndex
     Properties:
       RoleName: !Sub '${ProjectName}-${Environment}-bedrock-kb-role'
       AssumeRolePolicyDocument:
@@ -197,10 +263,15 @@ Resources:
                   - bedrock:InvokeModel
                 Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${EmbeddingModel}'
 
-  # Base de conocimiento de Bedrock
+  # 12. Base de conocimiento de Bedrock
   BedrockKnowledgeBase:
     Type: AWS::Bedrock::KnowledgeBase
-    DependsOn: VectorIndex
+    DependsOn: 
+      - BedrockKnowledgeBaseRole
+      - VectorIndex
+      - BedrockKnowledgeBaseRole
+      - DevOpsAgentBucket
+
     Properties:
       Name: !Sub '${ProjectName}-${Environment}-knowledge-base'
       Description: 'Base de conocimiento DevOps con sincronización S3-OpenSearch'
@@ -215,11 +286,11 @@ Resources:
           CollectionArn: !GetAtt VectorCollection.Arn
           VectorIndexName: 'devops-vectors'
           FieldMapping:
-            VectorField: 'vector_embedding'
-            TextField: 'content'
-            MetadataField: 'metadata'
+            VectorField: 'bedrock-knowledge-base-default-vector-devops'
+            TextField: 'AMAZON_BEDROCK_TEXT_CHUNK'
+            MetadataField: 'AMAZON_BEDROCK_METADATA'
 
-  # Fuente de datos S3 para la base de conocimiento
+  # 13. Fuente de datos S3 para la base de conocimiento
   BedrockDataSource:
     Type: AWS::Bedrock::DataSource
     Properties:
@@ -230,10 +301,6 @@ Resources:
         Type: S3
         S3Configuration:
           BucketArn: !GetAtt DevOpsAgentBucket.Arn
-          InclusionPrefixes:
-            - 'documents/'
-            - 'configs/'
-            - 'scripts/'
       VectorIngestionConfiguration:
         ChunkingConfiguration:
           ChunkingStrategy: FIXED_SIZE

@@ -23,10 +23,64 @@ Parameters:
       - cohere.embed-multilingual-v3
     Description: Modelo de embeddings para la base de conocimiento
 
+  LambdaArtifactBucketName:
+    Type: String
+    Default: lambda-artifacts-functions
+    Description: Bucket de almacenamiento de artefactos de lambdas
 Resources:
+  LambdaSyncS3ToKnowledgeRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: LambdaCloudWatchLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+
+  LambdaSyncS3ToKnowledge:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - LambdaSyncS3ToKnowledgeRole
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-sync-knowledge'
+      Runtime: python3.11
+      Handler: sync_s3_knowledge.handler
+      Role: !GetAtt LambdaSyncS3ToKnowledgeRole.Arn
+      Timeout: 900
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucketName
+        S3Key: sync_s3_knowledge.zip
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+
+  # Permiso para que S3 invoque la función Lambda
+  S3InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: LambdaSyncS3ToKnowledge
+    Properties:
+      FunctionName: !Ref LambdaSyncS3ToKnowledge
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub 'arn:aws:s3:::${ProjectName}-${Environment}-files-${AWS::AccountId}'
+
   # 1. Bucket S3 para archivos del agente DevOps
   DevOpsAgentBucket:
     Type: AWS::S3::Bucket
+    DependsOn: S3InvokeLambdaPermission
     Properties:
       BucketName: !Sub '${ProjectName}-${Environment}-files-${AWS::AccountId}'
       VersioningConfiguration:
@@ -40,6 +94,10 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt LambdaSyncS3ToKnowledge.Arn
 
   # 2. Política de encriptación para OpenSearch Serverless
   EncryptionPolicy:
@@ -192,8 +250,8 @@ Resources:
       Role: !GetAtt IndexCreatorLambdaRole.Arn
       Timeout: 900
       Code:
-        S3Bucket: lambda-artifacts-functions
-        S3Key: function.zip
+        S3Bucket: !Ref LambdaArtifactBucketName
+        S3Key: create_index_handler.zip
       Layers:
         - !Ref LambdaLayer
       Environment:

@@ -52,7 +52,8 @@ CloudFormation → Custom Resource → Lambda → OpenSearch Index Creation
 ```
 cloudformation-templates/
 ├── .gitignore                          # Archivos a ignorar en Git
-├── deploy.bat                          # Script de despliegue automatizado
+├── deploy.bat                          # Script de despliegue para Windows
+├── deploy.sh                           # Script de despliegue para Linux/macOS
 ├── devops-agent-infrastructure.yaml    # Template principal de CloudFormation
 ├── lambda-layer/                       # Dependencias compartidas
 └── src/
@@ -119,18 +120,31 @@ cloudformation-templates/
    - `layer-artifacts-lambdas` (para Lambda Layers)
    - `template-artifacts-devops` (para templates)
 
+### **Scripts de Despliegue Disponibles**
+
+- **Windows**: `deploy.bat` - Script batch nativo
+- **Linux/macOS**: `deploy.sh` - Script bash con colores y manejo robusto de errores
+
+> 💡 **Nota**: Ambos scripts implementan exactamente la misma lógica y flujo de despliegue.
+
 ### Proceso de Despliegue
 
-1. **Ejecutar el script de despliegue**:
-   ```bash
-   deploy.bat
-   ```
+#### **Windows**
+```cmd
+deploy.bat
+```
 
-2. **El script automatiza**:
-   - Instalación de dependencias Python
-   - Creación de Lambda Layers
-   - Empaquetado y subida de funciones Lambda
-   - Despliegue del stack de CloudFormation
+#### **Linux/macOS**
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+
+#### **El script automatiza**:
+- Instalación de dependencias Python
+- Creación de Lambda Layers
+- Empaquetado y subida de funciones Lambda
+- Despliegue del stack de CloudFormation
 
 ### Verificación del Despliegue
 

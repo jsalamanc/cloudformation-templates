@@ -23,11 +23,17 @@ Parameters:
       - cohere.embed-multilingual-v3
     Description: Modelo de embeddings para la base de conocimiento
 
+  AntropicClaudeKaiku:
+    Type: String
+    Default: arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0
+    Description: Nombre del proyecto para nombrar recursos
+
   LambdaArtifactBucketName:
     Type: String
     Default: lambda-artifacts-functions
     Description: Bucket de almacenamiento de artefactos de lambdas
 Resources:
+  # 1. Rol IAM para la función Lambda de sincronización S3
   LambdaSyncS3ToKnowledgeRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -50,6 +56,7 @@ Resources:
                   - 'logs:PutLogEvents'
                 Resource: 'arn:aws:logs:*:*:*'
 
+  # 2. Función Lambda para sincronizar S3 con base de conocimiento
   LambdaSyncS3ToKnowledge:
     Type: AWS::Lambda::Function
     DependsOn:
@@ -67,7 +74,7 @@ Resources:
         Variables:
           REGION: !Ref AWS::Region
 
-  # Permiso para que S3 invoque la función Lambda
+  # 3. Permiso para que S3 invoque la función Lambda
   S3InvokeLambdaPermission:
     Type: AWS::Lambda::Permission
     DependsOn: LambdaSyncS3ToKnowledge
@@ -77,7 +84,7 @@ Resources:
       Principal: s3.amazonaws.com
       SourceArn: !Sub 'arn:aws:s3:::${ProjectName}-${Environment}-files-${AWS::AccountId}'
 
-  # 1. Bucket S3 para archivos del agente DevOps
+  # 4. Bucket S3 para archivos del agente DevOps
   DevOpsAgentBucket:
     Type: AWS::S3::Bucket
     DependsOn: S3InvokeLambdaPermission
@@ -99,7 +106,7 @@ Resources:
           - Event: s3:ObjectCreated:*
             Function: !GetAtt LambdaSyncS3ToKnowledge.Arn
 
-  # 2. Política de encriptación para OpenSearch Serverless
+  # 5. Política de encriptación para OpenSearch Serverless
   EncryptionPolicy:
     Type: AWS::OpenSearchServerless::SecurityPolicy
     DependsOn: DevOpsAgentBucket
@@ -117,7 +124,7 @@ Resources:
           "AWSOwnedKey": true
         }
 
-  # 3. Política de red para OpenSearch Serverless
+  # 6. Política de red para OpenSearch Serverless
   NetworkPolicy:
     Type: AWS::OpenSearchServerless::SecurityPolicy
     DependsOn: EncryptionPolicy
@@ -141,7 +148,7 @@ Resources:
           }
         ]
 
-  # 4. Política de acceso para OpenSearch Serverless
+  # 7. Política de acceso para OpenSearch Serverless
   AccessPolicy:
     Type: AWS::OpenSearchServerless::AccessPolicy
     DependsOn: 
@@ -185,7 +192,7 @@ Resources:
           }
         ]
 
-  # 5. Rol IAM para la función Lambda (definido antes para evitar referencias circulares)
+  # 8. Rol IAM para la función Lambda de creación de índices
   IndexCreatorLambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -209,7 +216,7 @@ Resources:
                   - aoss:APIAccessAll
                 Resource: '*'
 
-  # 6. Lambda Layer para dependencias
+  # 9. Lambda Layer para dependencias
   LambdaLayer:
     Type: AWS::Lambda::LayerVersion
     Properties:
@@ -223,7 +230,7 @@ Resources:
         - python3.10
         - python3.11
 
-  # 7. Colección vectorial OpenSearch Serverless
+  # 10. Colección vectorial OpenSearch Serverless
   VectorCollection:
     Type: AWS::OpenSearchServerless::Collection
     DependsOn:
@@ -236,7 +243,7 @@ Resources:
       Type: VECTORSEARCH
       StandbyReplicas: 'DISABLED'
 
-  # 8. Función Lambda para crear el índice
+  # 11. Función Lambda para crear el índice
   IndexCreatorLambda:
     Type: AWS::Lambda::Function
     DependsOn:
@@ -258,7 +265,7 @@ Resources:
         Variables:
           REGION: !Ref AWS::Region
 
-  # 9. Permiso para que CloudFormation invoque la función Lambda
+  # 12. Permiso para que CloudFormation invoque la función Lambda
   LambdaInvokePermission:
     Type: AWS::Lambda::Permission
     DependsOn: IndexCreatorLambda
@@ -267,7 +274,7 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: cloudformation.amazonaws.com
 
-  # 10. Custom Resource para invocar y crear el índice vectorial
+  # 13. Custom Resource para invocar y crear el índice vectorial
   VectorIndex:
     Type: AWS::CloudFormation::CustomResource
     DependsOn: 
@@ -279,7 +286,7 @@ Resources:
       CollectionEndpoint: !GetAtt VectorCollection.CollectionEndpoint
       VectorIndexName: devops-vectors
 
-  # 11. Rol de servicio para Bedrock Knowledge Base
+  # 14. Rol de servicio para Bedrock Knowledge Base
   BedrockKnowledgeBaseRole:
     Type: AWS::IAM::Role
     DependsOn: VectorIndex
@@ -321,7 +328,7 @@ Resources:
                   - bedrock:InvokeModel
                 Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${EmbeddingModel}'
 
-  # 12. Base de conocimiento de Bedrock
+  # 15. Base de conocimiento de Bedrock
   BedrockKnowledgeBase:
     Type: AWS::Bedrock::KnowledgeBase
     DependsOn: 
@@ -348,7 +355,7 @@ Resources:
             TextField: 'AMAZON_BEDROCK_TEXT_CHUNK'
             MetadataField: 'AMAZON_BEDROCK_METADATA'
 
-  # 13. Fuente de datos S3 para la base de conocimiento
+  # 16. Fuente de datos S3 para la base de conocimiento
   BedrockDataSource:
     Type: AWS::Bedrock::DataSource
     Properties:
@@ -366,7 +373,7 @@ Resources:
             MaxTokens: 512
             OverlapPercentage: 20
 
-  # Rol IAM para el agente DevOps
+  # 17. Rol IAM para el agente DevOps
   DevOpsAgentRole:
     Type: AWS::IAM::Role
     Properties:
@@ -415,6 +422,72 @@ Resources:
                   - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${BedrockKnowledgeBase}'
                   - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/*'
 
+  # 18. Guadrial configured to agents
+  GuardrialBedrockAgents:
+    Type: AWS::Bedrock::Guardrail
+    DependsOn:
+      - BedrockKnowledgeBase
+      - BedrockDataSource
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-guardrail'
+      Description: Guardrail para agente DevOps especializado en AWS
+      BlockedInputMessaging: Esta consulta no está permitida. Como agente DevOps, solo puedo ayudarte con temas relacionados a AWS y DevOps.
+      BlockedOutputsMessaging: La respuesta generada no cumple con las políticas establecidas. Por favor, reformula tu pregunta enfocándote en DevOps.
+      ContentPolicyConfig:
+        FiltersConfig:
+          - Type: SEXUAL
+            InputStrength: HIGH
+            OutputStrength: HIGH
+          - Type: VIOLENCE
+            InputStrength: HIGH
+            OutputStrength: HIGH
+          - Type: HATE
+            InputStrength: HIGH
+            OutputStrength: HIGH
+          - Type: INSULTS
+            InputStrength: MEDIUM
+            OutputStrength: MEDIUM
+      TopicPolicyConfig:
+        TopicsConfig:
+          - Name: NonDevOpsTopics
+            Definition: Temas no relacionados con DevOps, AWS, infraestructura, CI/CD o automatización
+            Examples:
+              - Recetas de cocina
+              - Consejos de salud
+              - Entretenimiento
+            Type: DENY
+      WordPolicyConfig:
+        WordsConfig:
+          - Text: password
+          - Text: secret
+          - Text: token
+        ManagedWordListsConfig:
+          - Type: PROFANITY
+
+  # 19. Agente Bedrok para interactuar con las bases de conocimiento
+  DevOpsAgentBedrock:
+    Type: AWS::Bedrock::Agent
+    DependsOn:
+      - GuardrialBedrockAgents
+    Properties:
+      AgentName: DevOpsAgentBedrock
+      AgentResourceRoleArn: !GetAtt DevOpsAgentRole.Arn
+      AutoPrepare: true
+      Description: agente especializdo en devops con aws
+      FoundationModel: !Ref AntropicClaudeKaiku
+      GuardrailConfiguration:
+        GuardrailIdentifier: !Ref GuardrialBedrockAgents
+        GuardrailVersion: DRAFT
+      IdleSessionTTLInSeconds: 900
+      Instruction: te llamaras Camilo, eres un agente especializado en devops con aws y tecnologias aws. si el usuario te hace pregutnas relacionada con devops, apoyate en la base de conocimientos para nutrirte de informacion para generar respuestas
+      KnowledgeBases:
+        - KnowledgeBaseId: !Ref BedrockKnowledgeBase
+          Description: Base de conocimiento DevOps con documentación técnica de aws
+          KnowledgeBaseState: ENABLED
+      MemoryConfiguration:
+        EnabledMemoryTypes: 
+          - SESSION_SUMMARY
+        StorageDays: 30
 Outputs:
   S3BucketName:
     Description: 'Nombre del bucket S3 para archivos'
